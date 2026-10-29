@@ -1,5 +1,9 @@
 # Instamart Customer Intelligence & Support Copilot
 
+## Overview
+
+This repository builds an offline Instamart Customer Intelligence and Support Copilot across four parts: data foundation and SQL analysis, customer segmentation and lapse prediction, support-ticket triage, and policy retrieval with a refund agent. It uses synthetic data and the supplied deterministic helper files; no API key or network model is needed.
+
 **Repository branch:** `main`
 
 ## Reproduce
@@ -74,7 +78,8 @@ Run these commands from the repository root in Windows PowerShell. The helper fi
 15. Tune and evaluate lapse models: `.\.venv\Scripts\python.exe .\src\train_lapse_models.py`
 16. Run the class-balance experiment: `.\.venv\Scripts\python.exe .\src\class_balance_experiment.py`
 17. Save and check the selected model 
-18. Run ticket triage: `.\.venv\Scripts\python.exe .\src\ticket_triage.py` and retention list: `.\.venv\Scripts\python.exe .\src\finalize_lapse_model.py` and exploratory analysis:
+18. Run ticket triage: `.\.venv\Scripts\python.exe .\src\ticket_triage.py` and retention list: `.\.venv\Scripts\python.exe .\src\finalize_lapse_model.py` 19. Evaluate policy retrieval: `.\.venv\Scripts\python.exe .\src\policy_rag.py`
+20. Run refund scenarios and demonstrations: `.\.venv\Scripts\python.exe .\src\run_refund_agent.py` and exploratory analysis:
 
     ```powershell
     .\.venv\Scripts\python.exe .\src\pandas_analysis.py
@@ -326,3 +331,118 @@ The Premium test-set retention list contains the ten highest predicted lapse pro
 ### Limitations and Next Steps
 
 The Premium flag is a post-hoc whole-window label that includes September, so the retention list is illustrative and not a leakage-free evaluation. The lapse-model features themselves use only pre-cutoff orders; segment labels were excluded from model features, and no encoder, scaler, or resampler saw test rows. For a production retention experiment, define Premium status using data available at the cutoff and evaluate campaign outcomes prospectively.
+
+## Part C — Support Ticket Triage with Guardrails
+
+The pipeline processes all 164 tickets in file order using the supplied, unmodified `mock_llm.py`.
+
+### Input guardrails and privacy
+
+The pipeline skipped 4 empty or whitespace-only tickets and flagged 4 long tickets before any model call. The long tickets estimated to 734 tokens each; the maximum accepted input is 400 tokens.
+
+Before prompting, the pipeline redacted 55 emails, 91 phone numbers, and 132 order IDs, for 278 substitutions total. Reapplying the same patterns found zero remaining matches. An assertion checks for personal information in both prompt messages, and the user message contains only the redacted ticket text.
+
+### Retry and output validation
+
+Each run resets the mock immediately before processing. Transient errors are retried with exponential backoff and jitter, using the required base delay of 0.05 seconds and at most three retries per ticket. Each full run recovered all 19 transient errors. The observed first-retry waits were within the required 0.045–0.0575-second range. No ticket ended with a permanent error.
+
+Replies were accepted as `classified_json` when they were valid JSON with an allowed category. Non-JSON replies were accepted as `classified_keyword` only when the specified word extraction found exactly one allowed category. Other replies were marked `flagged_invalid_output` and sent to human review.
+
+| Final few-shot status | Tickets |
+|---|---:|
+| classified_json | 135 |
+| classified_keyword | 12 |
+| flagged_invalid_output | 9 |
+| flagged_long | 4 |
+| skipped_empty | 4 |
+
+### Zero-shot and few-shot comparison
+
+| Run | Classified | Accuracy on classified tickets | Total response tokens | Tokens per classified ticket |
+|---|---:|---:|---:|---:|
+| Zero-shot, no budget | 147 | 85.7% (126/147) | 10,804 | 73.50 |
+| Few-shot, no budget | 147 | 100.0% (147/147) | 19,228 | 130.80 |
+
+The few-shot prompt used an additional 57.31 tokens per classified ticket and improved accuracy by 14.3 percentage points. Zero-shot errors included 11 fraud tickets and 10 technical tickets classified as billing. The extra few-shot tokens are justified when reducing these routing errors, especially fraud misclassification, is worth the added token cost.
+
+Zero-shot confusion table:
+
+| True category | Predicted billing | Predicted delivery | Predicted technical | Predicted fraud |
+|---|---:|---:|---:|---:|
+| billing | 38 | 0 | 0 | 0 |
+| delivery | 0 | 36 | 0 | 0 |
+| technical | 10 | 0 | 29 | 0 |
+| fraud | 11 | 0 | 0 | 23 |
+
+### Budget and routing outputs
+
+The zero-shot budget demo used a 6,000-token limit and marked 69 tickets `budget_exhausted`. Its output is `outputs/triage_budget_demo.csv`.
+
+The final few-shot run used a 100,000-token budget, classified 147 tickets, and produced 164 rows in `outputs/triage_results.csv`. Of the classified outputs, 135 JSON replies and 12 keyword replies passed the category rules and were routed. The 9 invalid outputs and 8 tickets skipped or flagged by input guardrails went to `human_review` with normal priority.
+
+| Final route | Tickets |
+|---|---:|
+| security_team | 34 |
+| support_queue | 102 |
+| human_review | 17 |
+| premium_desk | 11 |
+
+Fraud tickets route to `security_team` with high priority. Otherwise, Premium customers route to `premium_desk` with high priority; other valid classifications route to `support_queue` with normal priority. Tickets with empty or long input, invalid output, or an exhausted budget go to `human_review` with normal priority. Customers absent from the segment file are treated as not Premium.
+
+## Part D — Policy RAG Assistant and Refund Agent
+
+### Policy chunking and retrieval
+
+The five policy documents were split into 40-word chunks with a 10-word overlap. The result was 15 chunks.
+
+| Policy file | Chunks |
+|---|---:|
+| refund_policy.txt | 4 |
+| delivery_policy.txt | 3 |
+| escalation_policy.txt | 3 |
+| payment_policy.txt | 3 |
+| privacy_policy.txt | 2 |
+
+The `TfidfVectorizer` was fitted to the chunks. TF measures how often a word appears in a chunk; IDF gives more weight to words that are less common across chunks. A limitation of TF-IDF is that two phrases with the same meaning but different words may have little lexical overlap.
+
+For the query `refund policy late delivery`, the top three retrieved chunks all came from `refund_policy.txt`. The `answer(question)` function retrieves three chunks, sends their source-labelled text and the question to the offline mock, and returns the answer with the sources used.
+
+| Chunk overlap | Expected document retrieved | Expected fact in answer | Unanswerable fallback |
+|---|---:|---:|---:|
+| 10 words | 12/12 | 12/12 | 2/2 |
+| 0 words | 12/12 | 10/12 | 2/2 |
+
+With zero overlap, the question “What delivery time makes a completed order eligible for a full refund?” failed the expected-fact check. The chunk containing the refund statement ended before the next chunk that specified “more than 45 minutes”; the mock answer returned the former without the threshold.
+
+### Refund tools and ReAct agent
+
+The tool specification and tool map contain `get_order`, `search_policy`, `calculate_refund`, `issue_refund`, and `escalate_to_human`. Refund actions are written to `outputs/refund_ledger.jsonl` with a timestamp and tool name. Each tool observation is checkpointed in `state/` so the agent can resume without repeating completed tools.
+
+| Scenario | Status | Refund amount | Model calls | Tokens used |
+|---|---|---:|---:|---:|
+| S1 | REFUND | INR 128.25 | 5 | 1,197 |
+| S2 | REFUND | INR 135.00 | 5 | 1,197 |
+| S3 | ESCALATE | INR 1,999.00 | 5 | 1,184 |
+| S4 | DENIED | INR 0.00 | 4 | 845 |
+| S5 | DENIED | INR 0.00 | 3 | 517 |
+| S6 | NOT_FOUND | INR 0.00 | 2 | 192 |
+| S7 | FALLBACK_MAX_ITERATIONS | INR 0.00 | 6 | 3,360 |
+
+Fallback demonstrations:
+
+| Demonstration | Result | Model calls | Tokens used |
+|---|---|---:|---:|
+| S1 with token limit 200 | FALLBACK_TOKEN_LIMIT | 2 | 222 |
+| S1 with time limit 0 seconds | FALLBACK_TIMEOUT | 0 | 0 |
+
+The crash-and-resume demonstration simulated a crash after the second tool observation was checkpointed. Across the original run and resume, the tools executed exactly once each, in this order: `get_order`, `search_policy`, `calculate_refund`, `issue_refund`. The resumed result was REFUND for INR 128.25.
+
+The seven scenario runs, fallback demonstrations, and crash-and-resume run are recorded in `outputs/agent_runs.jsonl`. Issued and escalated actions are recorded in `outputs/refund_ledger.jsonl`; resumable checkpoints are stored in `state/`.
+
+### ReAct compared with plan-and-execute
+
+ReAct used 5 model calls and 1,197 tokens for S1, 3 calls and 517 tokens for S5, and 2 calls and 192 tokens for S6. A plan-and-execute design could use fewer calls and less repeated context on a straightforward request by asking for the full plan once, then replanning only after an error. However, a missing order or cancelled order can change what action is safe; ReAct uses each tool observation before deciding the next step. For this refund workflow, I would choose ReAct because it verifies the order, policy, refund amount, and escalation threshold before taking a financial action.
+
+## Limitations and Next Steps
+
+The Premium flag is a post-hoc whole-window label that includes September, so the retention list is illustrative and not a leakage-free evaluation. A future retention evaluation should define Premium status using only information available at the prediction cutoff. TF-IDF can miss semantically equivalent policy wording that uses different terms, so retrieval quality should be checked against real support questions before deployment.

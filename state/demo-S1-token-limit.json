@@ -1,0 +1,57 @@
+{
+  "run_id": "demo-S1-token-limit",
+  "scenario_id": "S1",
+  "messages": [
+    {
+      "role": "system",
+      "content": "\nYou are an AGENT handling Instamart refund requests.\nUse the provided tools to look up the order, search the refund policy,\ncalculate the refund, and issue or escalate it. Only completed orders are\neligible. Refund the full amount only when delivery took more than 45 minutes.\nRefunds above INR 1000 must be escalated to a human.\n"
+    },
+    {
+      "role": "user",
+      "content": "My order ORD-100048 reached me very late. I would like a refund."
+    },
+    {
+      "role": "assistant",
+      "content": null,
+      "tool_calls": [
+        {
+          "id": "call_1",
+          "name": "get_order",
+          "arguments": {
+            "order_id": "ORD-100048"
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "tool_call_id": "call_1",
+      "name": "get_order",
+      "content": "{\"delivery_minutes\": 65.0, \"order_amount\": 128.25, \"order_id\": \"ORD-100048\", \"status\": \"completed\"}"
+    }
+  ],
+  "tokens_used": 99,
+  "llm_calls": 1,
+  "step_number": 1,
+  "steps": [
+    {
+      "tool_name": "get_order",
+      "arguments": {
+        "order_id": "ORD-100048"
+      },
+      "observation": {
+        "order_id": "ORD-100048",
+        "status": "completed",
+        "order_amount": 128.25,
+        "delivery_minutes": 65.0
+      }
+    }
+  ],
+  "tools_executed": [
+    "get_order"
+  ],
+  "max_iterations": 6,
+  "token_limit": 200,
+  "time_limit_seconds": 10,
+  "elapsed_seconds": 0.005154799961019307
+}
