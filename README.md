@@ -73,7 +73,8 @@ Run these commands from the repository root in Windows PowerShell. The helper fi
 14. Build lapse features and labels: `.\.venv\Scripts\python.exe .\src\build_lapse_dataset.py`
 15. Tune and evaluate lapse models: `.\.venv\Scripts\python.exe .\src\train_lapse_models.py`
 16. Run the class-balance experiment: `.\.venv\Scripts\python.exe .\src\class_balance_experiment.py`
-17. Save and check the selected model and retention list: `.\.venv\Scripts\python.exe .\src\finalize_lapse_model.py` and exploratory analysis:
+17. Save and check the selected model 
+18. Run ticket triage: `.\.venv\Scripts\python.exe .\src\ticket_triage.py` and retention list: `.\.venv\Scripts\python.exe .\src\finalize_lapse_model.py` and exploratory analysis:
 
     ```powershell
     .\.venv\Scripts\python.exe .\src\pandas_analysis.py
