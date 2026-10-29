@@ -66,7 +66,14 @@ Run these commands from the repository root in Windows PowerShell. The helper fi
    .\.venv\Scripts\python.exe .\src\run_sql_analysis.py
    ```
 
-10. Run the pandas cross-check and exploratory analysis:
+10. Run the pandas cross-check
+11. Build the RFM table: `.\.venv\Scripts\python.exe .\src\build_rfm.py`
+12. Compare clusters: `.\.venv\Scripts\python.exe .\src\cluster_customers.py`
+13. Export customer segments: `.\.venv\Scripts\python.exe .\src\export_customer_segments.py`
+14. Build lapse features and labels: `.\.venv\Scripts\python.exe .\src\build_lapse_dataset.py`
+15. Tune and evaluate lapse models: `.\.venv\Scripts\python.exe .\src\train_lapse_models.py`
+16. Run the class-balance experiment: `.\.venv\Scripts\python.exe .\src\class_balance_experiment.py`
+17. Save and check the selected model and retention list: `.\.venv\Scripts\python.exe .\src\finalize_lapse_model.py` and exploratory analysis:
 
     ```powershell
     .\.venv\Scripts\python.exe .\src\pandas_analysis.py
@@ -202,3 +209,119 @@ The strongest absolute pairwise correlation is between `order_amount` and `disco
 **Interpretation**
 
 These records describe completed Instamart orders, including customer cities, product categories, discounts, quantities, and delivery times. Order amounts are strongly right-skewed: the mean (INR 269.91) is above the median (INR 135.00), and skewness is 4.61. The middle half of amounts ranges from INR 64.80 to INR 297.00. The upper 1.5-IQR fence is INR 645.30; 897 orders exceed it and none fall below the lower fence. The strongest pairwise correlation is between order amount and discount percentage (-0.095); order amount and quantity is +0.087. Both relationships are weak. Correlation does not establish causation. Product mix, customer behavior, and other factors may also relate to order amounts.
+
+
+## Part B — Customer Segments and Lapse Prediction
+
+### RFM table
+
+RFM uses completed orders through the snapshot moment `2025-10-01 00:00:00`.
+
+| Measure | Result |
+|---|---:|
+| Customers with a completed order | 1,175 |
+| Recency, median / minimum / maximum | 19 / 0 / 180 days |
+| Frequency, mean / maximum | 9.46 / 33 |
+| Monetary, mean / maximum | INR 2,552.06 / INR 14,766.55 |
+
+### K-means and segment profiles
+
+The three RFM columns were standardized with `StandardScaler`. K-means used `n_init=10` and `random_state=42`.
+
+| K | Inertia | Silhouette |
+|---:|---:|---:|
+| 2 | 1,820.761 | 0.465 |
+| 3 | 1,268.235 | 0.445 |
+| 4 | 743.071 | 0.526 |
+| 5 | 617.367 | 0.480 |
+| 6 | 503.171 | 0.482 |
+| 7 | 408.460 | 0.416 |
+| 8 | 366.503 | 0.412 |
+
+K=4 is selected because it has the strongest silhouette score and a clear elbow in the inertia curve. Inertia falls as K increases because additional centroids bring customers closer to a cluster center; that alone does not justify adding more segments. Four groups also support distinct, practical campaign actions.
+
+| Segment ID | Business name | Size | Mean recency | Mean frequency | Mean monetary | Premium | Recommended action |
+|---:|---|---:|---:|---:|---:|---|---|
+| 0 | Occasional Shoppers | 436 | 28.86 days | 3.77 | INR 1,057.62 | No | Send relevant bundles to encourage another purchase. |
+| 1 | Premium Customers | 138 | 24.12 days | 6.77 | INR 7,129.70 | Yes | Offer tailored loyalty rewards to retain high-value customers. |
+| 2 | Loyal Regulars | 419 | 8.77 days | 19.40 | INR 3,410.02 | No | Promote replenishment reminders and relevant add-ons. |
+| 3 | At-Risk Customers | 182 | 109.04 days | 2.20 | INR 685.99 | No | Send a focused win-back offer. |
+
+Segment ID is only a cluster label and has no inherent ranking. The segment with the highest mean monetary value, segment 1, is marked Premium.
+
+PCA on the scaled RFM matrix explained 0.634 of variance in component 1 and 0.218 in component 2, for 0.852 combined.
+
+The required segment file is `outputs/customer_segments.csv`, with columns `customer_id`, `recency`, `frequency`, `monetary`, `segment_id`, `segment_name`, and `is_premium`.
+
+### Lapse cohort and features
+
+The cutoff is `2025-09-01`. The cohort contains customers with at least one completed order before the cutoff. A customer is labelled lapsed when they have no completed order during September 2025.
+
+| Measure | Result |
+|---|---:|
+| Cohort customers | 1,156 |
+| Lapsed customers | 443 (38.32%) |
+| Training rows | 924 |
+| Test rows | 232 |
+| Baseline accuracy | 0.616 |
+| Baseline lapsed-class F1 | 0.000 |
+
+Features are recency, frequency, monetary, average discount percentage, cancellation rate, average delivery time, most frequent product category, city, age, gender, and tenure in days. The feature table contains no missing values.
+
+No order dated on or after `2025-09-01` entered the features. September completed orders were used only to define the label. Segment labels from Part B's clustering were not used as model features.
+
+The numeric scaler's training mean for frequency was 8.115; the full-cohort mean was 8.029. They differ because the scaler was fitted only on training rows, while the cohort mean also includes the held-out test rows.
+
+Nominal columns were one-hot encoded with `drop="first"`. Scaling and encoding were performed inside cross-validation pipelines, fitted on training folds and then refitted on the full training partition. No encoder, scaler, or resampler saw test rows.
+
+### Model tuning and test evaluation
+
+Logistic Regression used `max_iter=1000`, five-fold cross-validation, F1 scoring, and C values 0.01, 0.1, 1, 10, and 100. Random Forest used 100 trees, `random_state=42`, five-fold cross-validation, F1 scoring, maximum depths 3, 5, and 8, and minimum leaf sizes 5, 10, and 20.
+
+| Model | Best parameters | Best cross-validated F1 | Test confusion matrix (true rows 0,1; predicted columns 0,1) | Lapsed precision | Lapsed recall | Lapsed F1 |
+|---|---|---:|---|---:|---:|---:|
+| Logistic Regression | C=100 | 0.651 | `[[111, 32], [31, 58]]` | 0.644 | 0.652 | 0.648 |
+| Random Forest | max depth 8, minimum leaf size 10 | 0.681 | `[[113, 30], [31, 58]]` | 0.659 | 0.652 | 0.655 |
+
+The selected model is the Random Forest. Its test F1 of 0.655 is higher than Logistic Regression's 0.648 and exceeds the required 0.55. Missing a lapsing customer means losing an opportunity to intervene, while wrongly targeting a loyal customer can waste a discount or annoy them. The Random Forest has the same recall as Logistic Regression, slightly higher precision, and two fewer false positives on this test set. This makes it the better balance for targeted retention in this evaluation.
+
+### Class-balance experiment
+
+The training set retained all original rows and oversampled lapsed training rows with replacement, using `random_state=42`, to reach 570 customers in each class. Evaluation used the original, unchanged test set.
+
+| Logistic model | Precision | Recall | F1 |
+|---|---:|---:|---:|
+| Unbalanced training | 0.644 | 0.652 | 0.648 |
+| Balanced training | 0.589 | 0.854 | 0.697 |
+
+Recall changed the most. The balanced model identifies more lapsing customers, but its lower precision means the retention team will also contact more customers who would not lapse.
+
+### Model interpretation and saved outputs
+
+Top five Random Forest feature importances:
+
+| Feature | Importance |
+|---|---:|
+| Frequency | 0.2796 |
+| Monetary | 0.2712 |
+| Recency | 0.1151 |
+| Average delivery time | 0.0613 |
+| Cancellation rate | 0.0523 |
+
+Frequency contributes the largest share of the forest's predictive splits. Monetary is the next strongest signal. Recency captures how recently the customer ordered. Average delivery time and cancellation rate also contribute to the model.
+
+Three largest-magnitude Logistic Regression coefficients:
+
+| Feature | Coefficient sign and value | Business reading |
+|---|---:|---|
+| Frequency | -1.6982 | Higher frequency is associated with lower lapse log-odds, holding the other features constant. |
+| Favourite category: Electronics | -1.1367 | Relative to the encoder's dropped reference category, Electronics is associated with lower lapse log-odds. |
+| Favourite category: Grocery | -0.4487 | Relative to the encoder's dropped reference category, Grocery is associated with lower lapse log-odds. |
+
+The selected model is saved to `outputs/lapse_model.joblib`. After reloading, its test predictions matched the original predictions exactly.
+
+The Premium test-set retention list contains the ten highest predicted lapse probabilities among 40 Premium customers in the test set. One of the ten was actually lapsed. The list is saved to `outputs/retention_list.csv` with columns `customer_id`, `lapse_probability`, and `actually_lapsed`.
+
+### Limitations and Next Steps
+
+The Premium flag is a post-hoc whole-window label that includes September, so the retention list is illustrative and not a leakage-free evaluation. The lapse-model features themselves use only pre-cutoff orders; segment labels were excluded from model features, and no encoder, scaler, or resampler saw test rows. For a production retention experiment, define Premium status using data available at the cutoff and evaluate campaign outcomes prospectively.
